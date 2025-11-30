@@ -96,7 +96,13 @@ const commands = [
     description: "このチャンネルにYouTube通知を設定",
     options: [{ name: "url", type: 3, description: "チャンネルURL", required: true }]
   },
-  { name: "youtubestop", description: "YouTube通知を解除" }
+  { name: "youtubestop", description: "YouTube通知を解除" },
+  { name: "shu", description: "妖怪ぷにの種族相性表を表示" },
+  {
+    name: "call",
+    description: "通話募集ボタンを設置",
+    options: [{ name: "role", type: 8, description: "通話募集するロール", required: true }]
+  }
 ];
 
 async function registerCommands() {
@@ -126,6 +132,18 @@ client.on("interactionCreate", async interaction => {
   const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
   const isMod = member.roles.cache.has(MODERATOR_ROLE_ID);
   const isSpecial = SPECIAL_USER_IDS.includes(interaction.user.id);
+
+  // ---- /shu ----
+  if (interaction.commandName === "shu") {
+    const filePath = "./images/shuzoku.png";
+    if (!fs.existsSync(filePath)) {
+      return interaction.reply({
+        content: "❌ 種族相性表が見つかりません\n`/images/shuzoku.png` を配置してください",
+        ephemeral: true
+      });
+    }
+    return interaction.reply({ content: "📊 **妖怪ぷに 種族相性表**はこちら！", files: [filePath] });
+  }
 
   // ---- /dm ----
   if (interaction.commandName === "dm") {
@@ -168,10 +186,7 @@ client.on("interactionCreate", async interaction => {
   // ---- /listservers ----
   if (interaction.commandName === "listservers") {
     if (!isSpecial) return interaction.reply({ content: "❌ 特別ユーザーのみ", ephemeral: true });
-    return interaction.reply({
-      content: client.guilds.cache.map(g => `• ${g.name} (${g.id})`).join("\n"),
-      ephemeral: true
-    });
+    return interaction.reply({ content: client.guilds.cache.map(g => `• ${g.name} (${g.id})`).join("\n"), ephemeral: true });
   }
 
   // ---- /setshiritori ----
@@ -186,9 +201,31 @@ client.on("interactionCreate", async interaction => {
   if (interaction.commandName === "youtube") {
     if (!isOwner && !isSubOwner && !isAdmin) return interaction.reply({ content: "❌ 権限なし", ephemeral: true });
     const url = interaction.options.getString("url");
-    const match = url.match(/(?:channel\/|c\/|user\/)([\w-]+)/);
-    if (!match) return interaction.reply({ content: "❌ URL形式が不正です", ephemeral: true });
-    youtubeConfig[interaction.guild.id] = { channelId: match[1], lastVideoId: null };
+    let channelId = null;
+
+    const matchId = url.match(/(?:channel\/|c\/|user\/)([\w-]+)/);
+    if (matchId) {
+      channelId = matchId[1];
+    } else if (url.includes("@")) {
+      try {
+        const handle = url.split("@")[1].split(/[/?]/)[0];
+        const res = await fetch(
+          `https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${handle}&type=channel&part=snippet`
+        );
+        const data = await res.json();
+        if (!data.items || !data.items.length) {
+          return interaction.reply({ content: "❌ YouTubeチャンネルが見つかりません", ephemeral: true });
+        }
+        channelId = data.items[0].snippet.channelId;
+      } catch (err) {
+        console.error(err);
+        return interaction.reply({ content: "❌ YouTube APIエラー", ephemeral: true });
+      }
+    } else {
+      return interaction.reply({ content: "❌ URL形式が不正です", ephemeral: true });
+    }
+
+    youtubeConfig[interaction.guild.id] = { channelId, lastVideoId: null };
     save(YOUTUBE_CONFIG_FILE, youtubeConfig);
     return interaction.reply({ content: "📺 YouTube通知チャンネルを設定しました", ephemeral: true });
   }
@@ -200,10 +237,23 @@ client.on("interactionCreate", async interaction => {
     save(YOUTUBE_CONFIG_FILE, youtubeConfig);
     return interaction.reply({ content: "🛑 YouTube通知を解除しました", ephemeral: true });
   }
+
+  // ---- /call ----
+  if (interaction.commandName === "call") {
+    const role = interaction.options.getRole("role");
+    if (!role) return interaction.reply({ content: "❌ ロールが見つかりません", ephemeral: true });
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`call_button_${role.id}`).setLabel("通話募集").setStyle(ButtonStyle.Primary)
+    );
+
+    await interaction.channel.send({ content: `📞 通話募集ボタン設置: ${role}`, components: [row] });
+    return interaction.reply({ content: "✅ 通話募集ボタンを設置しました", ephemeral: true });
+  }
 });
 
 // ===========================
-// 🌍 グローバルチャット / お助け募集 / しりとり / フレコ
+// 🌍 メッセージ系機能
 // ===========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
@@ -212,9 +262,7 @@ client.on("messageCreate", async message => {
   const guildId = message.guild.id;
   const setId = globalConfig.globalChannels[guildId];
   if (setId && message.channel.id === setId) {
-    const safe = message.content.replace(/@everyone/gi, "@\u200Beveryone")
-                                .replace(/@here/gi, "@\u200Bhere")
-                                .replace(/<@&\d+>/gi, "@ロール");
+    const safe = message.content.replace(/@everyone/gi, "@\u200Beveryone").replace(/@here/gi, "@\u200Bhere").replace(/<@&\d+>/gi, "@ロール");
     const files = [...message.attachments.values()].map(att => att.url);
 
     for (const [otherGuild, chId] of Object.entries(globalConfig.globalChannels)) {
@@ -224,19 +272,13 @@ client.on("messageCreate", async message => {
       if (!channel?.isTextBased()) continue;
 
       let wh = (await channel.fetchWebhooks()).find(w => w.name === "ぷにぷにグローバル");
-      if (!wh)
-        wh = await channel.createWebhook({ name: "ぷにぷにグローバル", avatar: message.author.displayAvatarURL() });
+      if (!wh) wh = await channel.createWebhook({ name: "ぷにぷにグローバル", avatar: message.author.displayAvatarURL() });
 
-      await wh.send({
-        username: message.author.username,
-        avatarURL: message.author.displayAvatarURL(),
-        content: safe,
-        files
-      });
+      await wh.send({ username: message.author.username, avatarURL: message.author.displayAvatarURL(), content: safe, files });
     }
   }
 
-  // お助け募集レベル分け
+  // お助け募集
   if (message.channel.name === "お助け募集") {
     const match = message.content.match(/^#(\d+)\s(.{8})(?:\s+([\s\S]*))?/);
     if (!match) { await message.delete().catch(() => {}); return; }
@@ -291,6 +333,16 @@ client.on("interactionCreate", async interaction => {
     await owner.send(`🛑 通報がありました\n通報者: ${interaction.user.tag}\n対象者: ${reportedText}\n理由: ${reason}`);
     await interaction.reply({ content: "✅ 通報を送信しました", ephemeral: true });
   }
+
+  // ---- 通話募集ボタン ----
+  if (interaction.isButton() && interaction.customId.startsWith("call_button_")) {
+    const roleId = interaction.customId.replace("call_button_", "");
+    const role = interaction.guild.roles.cache.get(roleId);
+    if (!role) return interaction.reply({ content: "❌ ロールが見つかりません", ephemeral: true });
+
+    await interaction.channel.send({ content: `📢 ${role} の皆さん、通話募集です！` });
+    await interaction.reply({ content: "✅ 通話募集メッセージを送信しました", ephemeral: true });
+  }
 });
 
 // ===========================
@@ -335,5 +387,3 @@ function startYouTubePolling() {
   await registerCommands();
   client.login(TOKEN);
 })();
-
-
