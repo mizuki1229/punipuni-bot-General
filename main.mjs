@@ -15,7 +15,8 @@ import {
   TextInputBuilder,
   TextInputStyle,
   PermissionsBitField,
-  EmbedBuilder
+  EmbedBuilder,
+  StringSelectMenuBuilder
 } from "discord.js";
 
 // ===========================
@@ -60,6 +61,7 @@ const GLOBAL_CONFIG_FILE = "./global_config.json";
 const REPORT_CONFIG_FILE = "./report_config.json";
 const SHIRITORI_FILE = "./shiritori_config.json";
 const YOUTUBE_CONFIG_FILE = "./youtube_config.json";
+const HELP_GLOBAL_FILE = "./help_global_config.json"; // <-- 新規ファイル
 
 function loadConfig(file, def) {
   if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify(def, null, 2));
@@ -73,6 +75,14 @@ let globalConfig = loadConfig(GLOBAL_CONFIG_FILE, { globalChannels: {} });
 let reportConfig = loadConfig(REPORT_CONFIG_FILE, { reportChannels: {} });
 let shiritoriConfig = loadConfig(SHIRITORI_FILE, { channels: {} });
 let youtubeConfig = loadConfig(YOUTUBE_CONFIG_FILE, {}); // { guildId: { channelId, lastVideoId } }
+let helpGlobalConfig = loadConfig(HELP_GLOBAL_FILE, { channels: {} }); // { guildId: { normal, raid } }
+
+// ===========================
+// 🔧 クールダウン設定（ユーザーごと）
+// ===========================
+// メモリ上で管理。Bot 再起動でリセットされます。
+const userCooldowns = {}; // { userId: lastTimestamp }
+const COOLDOWN_MS = 5 * 60 * 1000; // 5分
 
 // ===========================
 // 🔧 Slash Commands
@@ -102,6 +112,21 @@ const commands = [
     name: "call",
     description: "通話募集ボタンを設置",
     options: [{ name: "role", type: 8, description: "通話募集するロール", required: true }]
+  },
+
+  // お助けグローバルの設定コマンド
+  {
+    name: "sethelpg",
+    description: "お助けグローバルチャンネルを設定（通常 / 乱入）",
+    options: [
+      { name: "normal", description: "通常募集チャンネル", type: 7, required: true },
+      { name: "raid", description: "乱入募集チャンネル", type: 7, required: true }
+    ]
+  },
+  // 追加: お助けグローバル解除コマンド
+  {
+    name: "unsethelpg",
+    description: "お助けグローバル設定を解除（オーナー・副オーナー・管理者）"
   }
 ];
 
@@ -250,6 +275,69 @@ client.on("interactionCreate", async interaction => {
     await interaction.channel.send({ content: `📞 通話募集ボタン設置: ${role}`, components: [row] });
     return interaction.reply({ content: "✅ 通話募集ボタンを設置しました", ephemeral: true });
   }
+
+  // ---- /sethelpg ---- (新規: お助けグローバル設定)
+  if (interaction.commandName === "sethelpg") {
+    if (!isOwner && !isAdmin && !isSubOwner && !isSpecial) {
+      return interaction.reply({ content: "❌ 権限なし", ephemeral: true });
+    }
+
+    const normalCh = interaction.options.getChannel("normal");
+    const raidCh = interaction.options.getChannel("raid");
+
+    if (!normalCh || !raidCh) {
+      return interaction.reply({ content: "❌ チャンネルを指定してください", ephemeral: true });
+    }
+
+    helpGlobalConfig.channels[interaction.guild.id] = {
+      normal: normalCh.id,
+      raid: raidCh.id
+    };
+    save(HELP_GLOBAL_FILE, helpGlobalConfig);
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("help_global_button")
+        .setLabel("🌟 お助け募集する")
+        .setStyle(ButtonStyle.Success)
+    );
+
+    // === 変更点 ===
+    // ボタンは「コマンドを実行したチャンネル」に設置する（設定で指定したチャンネルではない）
+    // ただし、元からあった「各チャンネルに何か送る」機能は消さず、設定されたチャンネルには
+    // 「設定された通知」的な短いメッセージを送っておきます（ボタンは実行チャンネルのみ）。
+    try {
+      // 実行したチャンネルにボタンを設置
+      if (interaction.channel?.isTextBased())
+        await interaction.channel.send({ content: "🌟 お助けメニューが設置されました！ ボタンを押して募集を作成できます。", components: [row] });
+
+      // 設定先チャンネルには「設定された」ことを伝える（ボタンは送らない）
+      if (normalCh.isTextBased()) await normalCh.send({ content: "🟢 **通常募集チャンネル** として設定されました（ボタンはコマンド実行チャンネルに設置されます）" });
+      if (raidCh.isTextBased()) await raidCh.send({ content: "🔴 **乱入募集チャンネル** として設定されました（ボタンはコマンド実行チャンネルに設置されます）" });
+    } catch (err) {
+      console.error("sethelpg send error:", err);
+    }
+
+    return interaction.reply({ content: "✅ お助けグローバルを設定しました（ボタンはこのチャンネルに設置済み）", ephemeral: true });
+  }
+
+  // ---- /unsethelpg ---- (追加: お助けグローバル設定解除)
+  if (interaction.commandName === "unsethelpg") {
+    if (!isOwner && !isAdmin && !isSubOwner && !isSpecial) {
+      return interaction.reply({ content: "❌ 権限なし", ephemeral: true });
+    }
+
+    // 設定が存在するか
+    if (!helpGlobalConfig.channels || !helpGlobalConfig.channels[interaction.guild.id]) {
+      return interaction.reply({ content: "⚠️ このサーバーにはお助けグローバルの設定がありません", ephemeral: true });
+    }
+
+    // 削除して保存
+    delete helpGlobalConfig.channels[interaction.guild.id];
+    save(HELP_GLOBAL_FILE, helpGlobalConfig);
+
+    return interaction.reply({ content: "🗑 お助けグローバルの設定を解除しました", ephemeral: true });
+  }
 });
 
 // ===========================
@@ -278,7 +366,7 @@ client.on("messageCreate", async message => {
     }
   }
 
-  // お助け募集
+  // お助け募集（既存ローカル仕様）
   if (message.channel.name === "お助け募集") {
     const match = message.content.match(/^#(\d+)\s(.{8})(?:\s+([\s\S]*))?/);
     if (!match) { await message.delete().catch(() => {}); return; }
@@ -315,15 +403,106 @@ client.on("messageCreate", async message => {
 });
 
 // ===========================
-// ✉️ 通報ボタン + モーダル + DM通知
+// ✉️ 通報ボタン + モーダル + DM通知 + 通話ボタン等
 // ===========================
 client.on("interactionCreate", async interaction => {
+  // --- お助けグローバル: ボタン押下（レベル選択メニューを出す） ---
+  if (interaction.isButton() && interaction.customId === "help_global_button") {
+    const select = new StringSelectMenuBuilder()
+      .setCustomId("help_level_select")
+      .setPlaceholder("レベルを選択してください")
+      .addOptions([
+        { label: "通常", value: "通常" },
+        ...Array.from({ length: 15 }, (_, i) => ({ label: `${i + 1}`, value: `${i + 1}` }))
+      ]);
+
+    const row = new ActionRowBuilder().addComponents(select);
+    return interaction.reply({ content: "🎯 レベルを選択してください", components: [row], ephemeral: true });
+  }
+
+  // --- お助けグローバル: セレクト選択後 (モーダル表示) ---
+  if (interaction.isStringSelectMenu() && interaction.customId === "help_level_select") {
+    const level = interaction.values[0];
+
+    const modal = new ModalBuilder().setCustomId(`help_modal_${level}`).setTitle("お助け募集");
+
+    const fcInput = new TextInputBuilder()
+      .setCustomId("help_fc")
+      .setLabel("フレンドコード（8文字）")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const commentInput = new TextInputBuilder()
+      .setCustomId("help_comment")
+      .setLabel("ひとこと")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(false);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(fcInput), new ActionRowBuilder().addComponents(commentInput));
+    return interaction.showModal(modal);
+  }
+
+  // --- お助けグローバル: モーダル送信処理 ---
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("help_modal_")) {
+    const level = interaction.customId.replace("help_modal_", "");
+    const fc = interaction.fields.getTextInputValue("help_fc");
+    const comment = interaction.fields.getTextInputValue("help_comment") || "";
+
+    // バリデーション（フレコは8文字）
+    if (fc.length !== 8) {
+      return interaction.reply({ content: "❌ フレコは8文字です", ephemeral: true });
+    }
+
+    // ------------------------
+    // ここでユーザーごとのクールダウンをチェック
+    // ------------------------
+    const uid = interaction.user.id;
+    const last = userCooldowns[uid] || 0;
+    if (Date.now() - last < COOLDOWN_MS) {
+      const remaining = COOLDOWN_MS - (Date.now() - last);
+      const minutes = Math.floor(remaining / 60000);
+      const seconds = Math.floor((remaining % 60000) / 1000);
+      return interaction.reply({
+        content: `⏳ まだ募集できません。次に送れるまで **${minutes}分${seconds}秒**`,
+        ephemeral: true
+      });
+    }
+
+    // クールダウン更新（送信が成功する前に更新することで短時間の多重送信を防ぐ）
+    userCooldowns[uid] = Date.now();
+
+    const embed = new EmbedBuilder()
+      .setTitle(level === "通常" ? "通常" : `レベル${level}`)
+      .setDescription(comment || "（コメントなし）")
+      .setColor(0x00ffaa)
+      .setFooter({ text: `募集者: ${interaction.user.tag}` });
+
+    const isNormal = level === "通常";
+
+    for (const [gid, data] of Object.entries(helpGlobalConfig.channels)) {
+      const targetChId = isNormal ? data.normal : data.raid;
+      if (!targetChId) continue;
+
+      const g = client.guilds.cache.get(gid);
+      const ch = g?.channels.cache.get(targetChId);
+      if (!ch?.isTextBased()) continue;
+
+      await ch.send({ content: fc, embeds: [embed] }).catch(err => {
+        console.error(`Failed to send help message to guild ${gid} ch ${targetChId}:`, err);
+      });
+    }
+
+    return interaction.reply({ content: "✅ 送信しました！", ephemeral: true });
+  }
+
+  // ---------------- existing report/modal/call handling ----------------
   if (interaction.isButton() && interaction.customId === "open_report_modal") {
     const modal = new ModalBuilder().setCustomId("report_modal").setTitle("ユーザー通報");
     const userInput = new TextInputBuilder().setCustomId("reported_user").setLabel("通報対象").setStyle(TextInputStyle.Short).setRequired(true);
     const reasonInput = new TextInputBuilder().setCustomId("report_reason").setLabel("通報理由").setStyle(TextInputStyle.Paragraph).setRequired(true);
     modal.addComponents(new ActionRowBuilder().addComponents(userInput), new ActionRowBuilder().addComponents(reasonInput));
     await interaction.showModal(modal);
+    return;
   }
 
   if (interaction.isModalSubmit() && interaction.customId === "report_modal") {
@@ -332,6 +511,7 @@ client.on("interactionCreate", async interaction => {
     const owner = await client.users.fetch(interaction.guild.ownerId);
     await owner.send(`🛑 通報がありました\n通報者: ${interaction.user.tag}\n対象者: ${reportedText}\n理由: ${reason}`);
     await interaction.reply({ content: "✅ 通報を送信しました", ephemeral: true });
+    return;
   }
 
   // ---- 通話募集ボタン ----
@@ -342,6 +522,7 @@ client.on("interactionCreate", async interaction => {
 
     await interaction.channel.send({ content: `📢 ${role} の皆さん、通話募集です！` });
     await interaction.reply({ content: "✅ 通話募集メッセージを送信しました", ephemeral: true });
+    return;
   }
 });
 
