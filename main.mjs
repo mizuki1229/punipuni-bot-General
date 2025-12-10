@@ -346,59 +346,148 @@ client.on("interactionCreate", async interaction => {
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
-  // グローバルチャット
-  const guildId = message.guild.id;
-  const setId = globalConfig.globalChannels[guildId];
-  if (setId && message.channel.id === setId) {
-    const safe = message.content.replace(/@everyone/gi, "@\u200Beveryone").replace(/@here/gi, "@\u200Bhere").replace(/<@&\d+>/gi, "@ロール");
-    const files = [...message.attachments.values()].map(att => att.url);
+  // -------------------------
+  // 新規追加: お助けグローバルチャット（普通メッセージを転送）
+  // -------------------------
+  try {
+    if (message.guild) {
+      const guildId = message.guild.id;
+      const cfg = helpGlobalConfig.channels?.[guildId];
+      if (cfg) {
+        const isNormal = message.channel.id === cfg.normal;
+        const isRaid = message.channel.id === cfg.raid;
 
-    for (const [otherGuild, chId] of Object.entries(globalConfig.globalChannels)) {
-      if (otherGuild === guildId) continue;
-      const guild = client.guilds.cache.get(otherGuild);
-      const channel = guild?.channels.cache.get(chId);
-      if (!channel?.isTextBased()) continue;
+        if (isNormal || isRaid) {
+          // 無害化（everyone/here/role）
+          const safe = message.content
+            .replace(/@everyone/gi, "@\u200Beveryone")
+            .replace(/@here/gi, "@\u200Bhere")
+            .replace(/<@&\d+>/gi, "@ロール");
 
-      let wh = (await channel.fetchWebhooks()).find(w => w.name === "ぷにぷにグローバル");
-      if (!wh) wh = await channel.createWebhook({ name: "ぷにぷにグローバル", avatar: message.author.displayAvatarURL() });
+          // 添付ファイルの URL 配列
+          const files = [...message.attachments.values()].map(att => att.url);
 
-      await wh.send({ username: message.author.username, avatarURL: message.author.displayAvatarURL(), content: safe, files });
+          const embed = new EmbedBuilder()
+            .setTitle(isNormal ? "📡 お助けGlobal — 通常" : "📡 お助けGlobal — 乱入")
+            .setDescription(`**【${message.guild.name}】${message.author.tag}**\n${safe || "（画像 / 添付のみ）"}`)
+            .setColor(isNormal ? 0x00a8ff : 0xff4444)
+            .setTimestamp();
+
+          // 送信先：helpGlobalConfig に登録された各サーバーの対応チャンネル
+          for (const [otherGid, data] of Object.entries(helpGlobalConfig.channels || {})) {
+            if (otherGid === guildId) continue; // 自分のサーバーへは送らない（ループ防止）
+
+            const targetChId = isNormal ? data.normal : data.raid;
+            if (!targetChId) continue;
+
+            const g = client.guilds.cache.get(otherGid);
+            const ch = g?.channels.cache.get(targetChId);
+            if (!ch?.isTextBased()) continue;
+
+            // 送信（添付がある場合は files も送る）
+            try {
+              if (files.length) {
+                // embed + files
+                await ch.send({ embeds: [embed], content: files.join("\n") }).catch(() => {});
+              } else {
+                await ch.send({ embeds: [embed] }).catch(() => {});
+              }
+            } catch (err) {
+              // 送信失敗はログのみ
+              console.error(`Failed to send help-global message to guild ${otherGid} ch ${targetChId}:`, err);
+            }
+          }
+        }
+      }
     }
+  } catch (e) {
+    console.error("help-global message handler error:", e);
   }
 
+  // -------------------------
+  // 既存のぷにぷにグローバルチャット（元の globalConfig を使った Webhook 転送）
+  // -------------------------
+  try {
+    const guildId = message.guild?.id;
+    const setId = guildId ? globalConfig.globalChannels[guildId] : null;
+    if (guildId && setId && message.channel.id === setId) {
+      const safe = message.content.replace(/@everyone/gi, "@\u200Beveryone").replace(/@here/gi, "@\u200Bhere").replace(/<@&\d+>/gi, "@ロール");
+      const files = [...message.attachments.values()].map(att => att.url);
+
+      for (const [otherGuild, chId] of Object.entries(globalConfig.globalChannels)) {
+        if (otherGuild === guildId) continue;
+        const guild = client.guilds.cache.get(otherGuild);
+        const channel = guild?.channels.cache.get(chId);
+        if (!channel?.isTextBased()) continue;
+
+        let wh = (await channel.fetchWebhooks()).find(w => w.name === "ぷにぷにグローバル");
+        if (!wh) {
+          try {
+            wh = await channel.createWebhook({ name: "ぷにぷにグローバル", avatar: message.author.displayAvatarURL() });
+          } catch (err) {
+            console.error("webhook create error:", err);
+            continue;
+          }
+        }
+
+        await wh.send({ username: message.author.username, avatarURL: message.author.displayAvatarURL(), content: safe, files }).catch(() => {});
+      }
+    }
+  } catch (e) {
+    console.error("ぷにぷにグローバル handler error:", e);
+  }
+
+  // -------------------------
   // お助け募集（既存ローカル仕様）
-  if (message.channel.name === "お助け募集") {
-    const match = message.content.match(/^#(\d+)\s(.{8})(?:\s+([\s\S]*))?/);
-    if (!match) { await message.delete().catch(() => {}); return; }
-    const level = parseInt(match[1], 10);
-    const fc = match[2]; const text = match[3] || "";
-    let targetName = null;
-    if (level === 0) targetName = "お助け通常";
-    else if (level >= 1 && level <= 4) targetName = "レベル1～4";
-    else if (level >= 5 && level <= 7) targetName = "レベル5～7";
-    else if (level >= 8 && level <= 10) targetName = "レベル8～10";
-    else if (level >= 11 && level <= 15) targetName = "レベル11～15";
-    else { const warn = await message.channel.send("⚠️ このレベルは無効です"); setTimeout(() => warn.delete().catch(() => {}), 5000); await message.delete().catch(() => {}); return; }
+  // -------------------------
+  try {
+    if (message.channel.name === "お助け募集") {
+      const match = message.content.match(/^#(\d+)\s(.{8})(?:\s+([\s\S]*))?/);
+      if (!match) { await message.delete().catch(() => {}); return; }
+      const level = parseInt(match[1], 10);
+      const fc = match[2]; const text = match[3] || "";
+      let targetName = null;
+      if (level === 0) targetName = "お助け通常";
+      else if (level >= 1 && level <= 4) targetName = "レベル1～4";
+      else if (level >= 5 && level <= 7) targetName = "レベル5～7";
+      else if (level >= 8 && level <= 10) targetName = "レベル8～10";
+      else if (level >= 11 && level <= 15) targetName = "レベル11～15";
+      else { const warn = await message.channel.send("⚠️ このレベルは無効です"); setTimeout(() => warn.delete().catch(() => {}), 5000); await message.delete().catch(() => {}); return; }
 
-    const targetChannel = message.guild.channels.cache.find(ch => ch.name === targetName && ch.isTextBased());
-    if (targetChannel) {
-      if (level === 0) await targetChannel.send(fc);
-      else await targetChannel.send({ content: fc, embeds: [{ title: `レベル${level}`, description: text, color: 0x00aa00 }] });
+      const targetChannel = message.guild.channels.cache.find(ch => ch.name === targetName && ch.isTextBased());
+      if (targetChannel) {
+        if (level === 0) await targetChannel.send(fc);
+        else await targetChannel.send({ content: fc, embeds: [{ title: `レベル${level}`, description: text, color: 0x00aa00 }] });
+      }
+      await message.delete().catch(() => {});
     }
-    await message.delete().catch(() => {});
+  } catch (e) {
+    console.error("お助け募集 handler error:", e);
   }
 
+  // -------------------------
   // しりとり
-  const st = shiritoriConfig.channels[message.guild.id];
-  if (st && st === message.channel.id && /[んン]$/.test(message.content)) {
-    message.delete().catch(() => {});
-    message.author.send("❌ 最後に『ん』は禁止です").catch(() => {});
+  // -------------------------
+  try {
+    const st = shiritoriConfig.channels[message.guild?.id];
+    if (st && message.guild && st === message.channel.id && /[んン]$/.test(message.content)) {
+      message.delete().catch(() => {});
+      message.author.send("❌ 最後に『ん』は禁止です").catch(() => {});
+    }
+  } catch (e) {
+    console.error("しりとり handler error:", e);
   }
 
+  // -------------------------
   // フレンドコード
-  if (message.channel.id === FRIEND_CHANNEL_ID && message.content.length !== 8) {
-    message.delete().catch(() => {});
-    message.channel.send(`${message.author} 8文字だけ送ってください`).then(m => setTimeout(() => m.delete(), 5000));
+  // -------------------------
+  try {
+    if (message.channel.id === FRIEND_CHANNEL_ID && message.content.length !== 8) {
+      message.delete().catch(() => {});
+      message.channel.send(`${message.author} 8文字だけ送ってください`).then(m => setTimeout(() => m.delete(), 5000));
+    }
+  } catch (e) {
+    console.error("フレンドコード handler error:", e);
   }
 });
 
