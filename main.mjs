@@ -533,13 +533,20 @@ client.on("interactionCreate", async interaction => {
 
   // --- お助けグローバル: モーダル送信処理 ---
   if (interaction.isModalSubmit() && interaction.customId.startsWith("help_modal_")) {
+    // *** 修正ポイント ***
+    // モーダル返信は 3 秒以内に reply しないと Unknown interaction になります。
+    // そのため最初に deferReply() を呼び、その後重い処理を行い、最後に editReply() する方式に変更しました。
+    await interaction.deferReply({ flags: 64 });
+
     const level = interaction.customId.replace("help_modal_", "");
     const fc = interaction.fields.getTextInputValue("help_fc");
     const comment = interaction.fields.getTextInputValue("help_comment") || "";
 
     // バリデーション（フレコは8文字）
     if (fc.length !== 8) {
-      return interaction.reply({ content: "❌ フレコは8文字です", ephemeral: true });
+      // すでに deferReply しているので editReply を使う
+      await interaction.editReply({ content: "❌ フレコは8文字です" });
+      return;
     }
 
     // ------------------------
@@ -551,10 +558,10 @@ client.on("interactionCreate", async interaction => {
       const remaining = COOLDOWN_MS - (Date.now() - last);
       const minutes = Math.floor(remaining / 60000);
       const seconds = Math.floor((remaining % 60000) / 1000);
-      return interaction.reply({
-        content: `⏳ まだ募集できません。次に送れるまで **${minutes}分${seconds}秒**`,
-        ephemeral: true
+      await interaction.editReply({
+        content: `⏳ まだ募集できません。次に送れるまで **${minutes}分${seconds}秒**`
       });
+      return;
     }
 
     // クールダウン更新（送信が成功する前に更新することで短時間の多重送信を防ぐ）
@@ -568,20 +575,28 @@ client.on("interactionCreate", async interaction => {
 
     const isNormal = level === "通常";
 
-    for (const [gid, data] of Object.entries(helpGlobalConfig.channels)) {
-      const targetChId = isNormal ? data.normal : data.raid;
-      if (!targetChId) continue;
+    try {
+      for (const [gid, data] of Object.entries(helpGlobalConfig.channels)) {
+        const targetChId = isNormal ? data.normal : data.raid;
+        if (!targetChId) continue;
 
-      const g = client.guilds.cache.get(gid);
-      const ch = g?.channels.cache.get(targetChId);
-      if (!ch?.isTextBased()) continue;
+        const g = client.guilds.cache.get(gid);
+        const ch = g?.channels.cache.get(targetChId);
+        if (!ch?.isTextBased()) continue;
 
-      await ch.send({ content: fc, embeds: [embed] }).catch(err => {
-        console.error(`Failed to send help message to guild ${gid} ch ${targetChId}:`, err);
-      });
+        await ch.send({ content: fc, embeds: [embed] }).catch(err => {
+          console.error(`Failed to send help message to guild ${gid} ch ${targetChId}:`, err);
+        });
+      }
+
+      // 最後に editReply で確認メッセージを返す
+      await interaction.editReply({ content: "✅ 送信しました！" });
+    } catch (err) {
+      console.error("help_modal send error:", err);
+      await interaction.editReply({ content: "❌ 送信中にエラーが発生しました。再度お試しください。" });
     }
 
-    return interaction.reply({ content: "✅ 送信しました！", ephemeral: true });
+    return;
   }
 
   // ---------------- existing report/modal/call handling ----------------
